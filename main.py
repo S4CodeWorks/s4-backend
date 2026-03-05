@@ -9,7 +9,7 @@ import yt_dlp
 
 app = FastAPI(title="S4 Player API")
 
-# Libera o acesso para o seu site na Vercel e localmente
+# Liberação de CORS - Permite que seu site na Vercel fale com o Render
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -18,12 +18,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Banco de dados temporário para o progresso
 progress_db = {}
 
-# Disfarce para o YouTube não bloquear o servidor
+# Cabeçalhos para simular um navegador real
 HEADERS = {
-    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'accept-language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
 }
 
@@ -45,13 +46,20 @@ class DownloadRequest(BaseModel):
 def home():
     return {"message": "S4 Player API está rodando!"}
 
+# ROTA DE PREVIEW (Informações do vídeo)
 @app.get("/api/info")
 def get_video_info(url: str):
     ydl_opts = {
         'quiet': True, 
         'no_warnings': True, 
         'extract_flat': False,
-        'http_headers': HEADERS # Aplica o disfarce aqui
+        'http_headers': HEADERS,
+        # 🍎 O TRUQUE: Força o uso do cliente iOS para evitar o bloqueio de bot
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios'],
+            }
+        }
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -68,9 +76,10 @@ def get_video_info(url: str):
                 "original_url": url
             }
     except Exception as e:
-        print(f"Erro no logs do Render: {str(e)}") # Ajuda a debugar nos Logs
-        raise HTTPException(status_code=400, detail="Não foi possível extrair dados do YouTube.")
+        print(f"ERRO NOS LOGS: {str(e)}")
+        raise HTTPException(status_code=400, detail="O YouTube bloqueou o servidor. Tente novamente em instantes.")
 
+# FUNÇÃO DE MONITORAMENTO DO PROGRESSO
 def get_progress_hook(task_id):
     def hook(d):
         if d['status'] == 'downloading':
@@ -85,6 +94,7 @@ def get_progress_hook(task_id):
             progress_db[task_id]["status"] = "processing"
     return hook
 
+# FUNÇÃO QUE FAZ O DOWNLOAD REAL NO SERVIDOR
 def process_download(task_id: str, req: DownloadRequest):
     os.makedirs("temp_downloads", exist_ok=True)
     output_template = f"temp_downloads/{task_id}.%(ext)s"
@@ -95,6 +105,12 @@ def process_download(task_id: str, req: DownloadRequest):
         'noprogress': True,
         'http_headers': HEADERS,
         'progress_hooks': [get_progress_hook(task_id)],
+        # 🍎 TRUQUE REPETIDO: Garante que o download também use o cliente iOS
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios'],
+            }
+        }
     }
 
     if req.format_type == 'audio':
@@ -112,7 +128,6 @@ def process_download(task_id: str, req: DownloadRequest):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(req.url, download=True)
             filename = ydl.prepare_filename(info)
-            # Garante que o nome do arquivo final seja limpo
             safe_title = "".join([c for c in info.get('title', 'video') if c.isalnum() or c==' ']).strip()
             final_ext = filename.split('.')[-1]
             
@@ -123,6 +138,7 @@ def process_download(task_id: str, req: DownloadRequest):
                 "download_name": f"{safe_title}.{final_ext}"
             }
     except Exception as e:
+        print(f"ERRO NO DOWNLOAD: {str(e)}")
         progress_db[task_id] = {"status": "error"}
 
 @app.post("/api/download/start")
